@@ -3,7 +3,11 @@ FROM ghcr.io/foundry-rs/foundry:v1.1.0 AS builder
 
 WORKDIR /build
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* .gitmodules ./
+# Copy git files needed for submodule initialization
+COPY .git ./.git
+COPY .gitmodules ./.gitmodules
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
 
 COPY contracts ./contracts
 
@@ -12,11 +16,17 @@ USER root
 # ----------------------------------------------------
 
 RUN apt-get update && \
-    apt-get install -y ca-certificates curl gnupg && \
+    apt-get install -y ca-certificates curl gnupg git && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/* && \
     corepack enable
+
+# Initialize and update git submodules
+# Fix git ownership issue by marking directory as safe
+RUN git config --global --add safe.directory /build && \
+    git submodule sync --recursive && \
+    git submodule update --init --recursive
 
 RUN pnpm install --frozen-lockfile
 

@@ -92,7 +92,11 @@ export class Server {
             disableRequestLogging: true
         })
         if (config.enableCors) {
-            this.fastify.register(cors, { origin: true })
+            this.fastify.register(cors, {
+                origin: "*",
+                methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"]
+            })
         }
 
         this.fastify.register(rpcDecorators)

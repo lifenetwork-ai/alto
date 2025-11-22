@@ -7,51 +7,57 @@ import type { EventManager, GasPriceManager } from "@alto/handlers"
 import type {
     InterfaceReputationManager,
     Mempool,
-    Monitor
+    StatusManager
 } from "@alto/mempool"
-import type { ApiVersion, BundlerRequest } from "@alto/types"
 import {
     type Address,
+    type ApiVersion,
+    type BundlerRequest,
+    ERC7769Errors,
     EntryPointV06Abi,
     EntryPointV07Abi,
     type InterfaceValidator,
     RpcError,
-    type UserOperation,
-    ValidationErrors
+    type UserOperation
 } from "@alto/types"
-import type { Logger, Metrics } from "@alto/utils"
-import { getNonceKeyAndSequence, isVersion06, isVersion07 } from "@alto/utils"
+import {
+    type Logger,
+    type Metrics,
+    getNonceKeyAndSequence,
+    isVersion06,
+    isVersion07
+} from "@alto/utils"
 import { getContract, zeroAddress } from "viem"
-import { generatePrivateKey, privateKeyToAddress } from "viem/accounts"
 import { recoverAuthorizationAddress } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
 import type { BundleManager } from "../executor/bundleManager"
+import { getEip7702AuthAddress } from "../utils/eip7702"
 import type { MethodHandler } from "./createMethodHandler"
 import { registerHandlers } from "./methods"
 
 export class RpcHandler {
-    public config: AltoConfig
-    public validator: InterfaceValidator
-    public mempool: Mempool
-    public executor: Executor
-    public monitor: Monitor
-    public executorManager: ExecutorManager
-    public reputationManager: InterfaceReputationManager
-    public metrics: Metrics
-    public eventManager: EventManager
-    public gasPriceManager: GasPriceManager
-    public bundleManager: BundleManager
-    public logger: Logger
+    public readonly config: AltoConfig
+    public readonly validator: InterfaceValidator
+    public readonly mempool: Mempool
+    public readonly executor: Executor
+    public readonly statusManager: StatusManager
+    public readonly executorManager: ExecutorManager
+    public readonly reputationManager: InterfaceReputationManager
+    public readonly metrics: Metrics
+    public readonly eventManager: EventManager
+    public readonly gasPriceManager: GasPriceManager
+    public readonly bundleManager: BundleManager
+    public readonly logger: Logger
 
-    private methodHandlers: Map<string, MethodHandler>
-    private eip7702CodeCache: Map<Address, boolean>
+    private readonly methodHandlers: Map<string, MethodHandler>
+    private readonly eip7702CodeCache: Map<Address, boolean>
 
     constructor({
         config,
         validator,
         mempool,
         executor,
-        monitor,
+        statusManager,
         executorManager,
         reputationManager,
         bundleManager,
@@ -63,7 +69,7 @@ export class RpcHandler {
         validator: InterfaceValidator
         mempool: Mempool
         executor: Executor
-        monitor: Monitor
+        statusManager: StatusManager
         executorManager: ExecutorManager
         reputationManager: InterfaceReputationManager
         bundleManager: BundleManager
@@ -75,7 +81,7 @@ export class RpcHandler {
         this.validator = validator
         this.mempool = mempool
         this.executor = executor
-        this.monitor = monitor
+        this.statusManager = statusManager
         this.executorManager = executorManager
         this.reputationManager = reputationManager
         this.metrics = metrics
@@ -105,7 +111,7 @@ export class RpcHandler {
         if (!handler) {
             throw new RpcError(
                 "Method not supported",
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
@@ -122,7 +128,7 @@ export class RpcHandler {
                 `EntryPoint ${entryPoint} not supported, supported EntryPoints: ${this.config.entrypoints.join(
                     ", "
                 )}`,
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
     }
@@ -172,7 +178,7 @@ export class RpcHandler {
             }
         }
 
-        if (userOp.verificationGasLimit < 10000n) {
+        if (userOp.verificationGasLimit < 10_000n) {
             return [false, "verificationGasLimit must be at least 10000"]
         }
 
@@ -192,13 +198,13 @@ export class RpcHandler {
 
         const gasLimits = calculateAA95GasFloor({
             userOps: [userOp],
-            beneficiary: privateKeyToAddress(generatePrivateKey())
+            beneficiary: this.config.utilityWalletAddress
         })
 
-        if (gasLimits > this.config.maxGasPerBundle) {
+        if (gasLimits > this.config.maxGasPerUserOp) {
             return [
                 false,
-                `User operation gas limits exceed the max gas per bundle: ${gasLimits} > ${this.config.maxGasPerBundle}`
+                `User operation gas limits exceed the max gas per userOp: ${gasLimits} > ${this.config.maxGasPerUserOp}`
             ]
         }
 
@@ -220,10 +226,7 @@ export class RpcHandler {
         }
 
         // Check that auth is valid.
-        const delegationDesignator =
-            "address" in userOp.eip7702Auth
-                ? userOp.eip7702Auth.address
-                : userOp.eip7702Auth.contractAddress
+        const delegationDesignator = getEip7702AuthAddress(userOp.eip7702Auth)
 
         // Fetch onchain data in parallel
         const [sender, nonceOnChain, delegateCode] = await Promise.all([
@@ -239,12 +242,12 @@ export class RpcHandler {
                           yParity: userOp.eip7702Auth.yParity
                       }
                   })
-                : Promise.resolve(userOp.sender),
+                : userOp.sender,
             this.config.publicClient.getTransactionCount({
                 address: userOp.sender
             }),
             this.eip7702CodeCache.has(delegationDesignator)
-                ? Promise.resolve("has-code")
+                ? "has-code"
                 : this.config.publicClient.getCode({
                       address: delegationDesignator
                   })

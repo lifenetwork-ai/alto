@@ -1,11 +1,11 @@
-import type { UserOperationReceipt } from "@alto/types"
-import { userOperationReceiptSchema } from "@alto/types"
-import type { Logger } from "@alto/utils"
-import { asyncCallWithTimeout } from "@alto/utils"
+import {
+    type UserOperationReceipt,
+    userOperationReceiptSchema
+} from "@alto/types"
+import { type Logger, asyncCallWithTimeout } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import Redis from "ioredis"
 import { type Hex, toHex } from "viem"
-import { getRedisKeys } from "../cli/config/redisKeys"
 import type { AltoConfig } from "../createConfig"
 import type { ReceiptCache } from "./index"
 
@@ -33,13 +33,12 @@ export const createRedisReceiptCache = ({
     redisEndpoint: string
     logger: Logger
 }): ReceiptCache => {
-    const REDIS_TIMEOUT = 100 // 100ms timeout for all Redis operations
+    const REDIS_TIMEOUT = 500 // 500ms timeout for all Redis operations
     const redis = new Redis(redisEndpoint)
-    const redisKeys = getRedisKeys(config)
-    const keyPrefix = redisKeys.userOpReceiptCachePrefix
+    const redisPrefix = `${config.redisKeyPrefix}:${config.chainId}:receipt-cache`
 
     const getKey = (userOpHash: Hex): string => {
-        return `${keyPrefix}:${userOpHash}`
+        return `${redisPrefix}:${userOpHash}`
     }
 
     return {
@@ -68,23 +67,22 @@ export const createRedisReceiptCache = ({
             }
         },
 
-        set: async (
-            userOpHash: Hex,
-            receipt: UserOperationReceipt
-        ): Promise<void> => {
+        cache: async (receipts: UserOperationReceipt[]): Promise<void> => {
             try {
-                const key = getKey(userOpHash)
-                const serialized = serializeReceipt(receipt)
+                const pipeline = redis.pipeline()
+                const ttlSeconds = Math.floor(ttl / 1000)
 
-                // Set with TTL in seconds
-                await asyncCallWithTimeout(
-                    redis.setex(key, Math.floor(ttl / 1000), serialized),
-                    REDIS_TIMEOUT
-                )
+                for (const receipt of receipts) {
+                    const key = getKey(receipt.userOpHash)
+                    const serialized = serializeReceipt(receipt)
+                    pipeline.setex(key, ttlSeconds, serialized)
+                }
+
+                await asyncCallWithTimeout(pipeline.exec(), REDIS_TIMEOUT)
             } catch (err) {
                 logger.error(
-                    { err, userOpHash },
-                    "Failed to set receipt in Redis"
+                    { err, count: receipts.length },
+                    "Failed to set receipt batch in Redis"
                 )
                 sentry.captureException(err)
             }

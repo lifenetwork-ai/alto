@@ -1,8 +1,8 @@
 import {
+    ERC7769Errors,
     RpcError,
     type UserOpInfo,
     type UserOperationBundle,
-    ValidationErrors,
     pimlicoSendUserOperationNowSchema
 } from "@alto/types"
 import {
@@ -21,36 +21,30 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
         if (!rpcHandler.config.enableInstantBundlingEndpoint) {
             throw new RpcError(
                 "pimlico_sendUserOperationNow endpoint is not enabled",
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
         const [userOp, entryPoint] = params
         rpcHandler.ensureEntryPointIsSupported(entryPoint)
 
-        const opHash = await getUserOpHash({
+        const userOpHash = getUserOpHash({
             userOp,
             entryPointAddress: entryPoint,
-            chainId: rpcHandler.config.chainId,
-            publicClient: rpcHandler.config.publicClient
+            chainId: rpcHandler.config.chainId
         })
 
         const [preMempoolValid, preMempoolError] =
             await rpcHandler.preMempoolChecks(userOp, apiVersion)
 
         if (!preMempoolValid) {
-            throw new RpcError(preMempoolError, ValidationErrors.InvalidFields)
+            throw new RpcError(preMempoolError, ERC7769Errors.InvalidFields)
         }
 
         // Prepare bundle
         const userOpInfo: UserOpInfo = {
             userOp,
-            userOpHash: await getUserOpHash({
-                userOp,
-                entryPointAddress: entryPoint,
-                chainId: rpcHandler.config.chainId,
-                publicClient: rpcHandler.config.publicClient
-            }),
+            userOpHash,
             addedToMempool: Date.now(),
             submissionAttempts: 0
         }
@@ -71,14 +65,17 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
             version,
             submissionAttempts: 0
         }
-        rpcHandler.mempool.store.addProcessing({ entryPoint, userOpInfo })
+        rpcHandler.mempool.store.addProcessing({
+            entryPoint,
+            userOpInfo
+        })
         const result =
             await rpcHandler.executorManager.sendBundleToExecutor(bundle)
 
         if (!result) {
             throw new RpcError(
                 "unhandled error during bundle submission",
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
@@ -89,6 +86,6 @@ export const pimlicoSendUserOperationNowHandler = createMethodHandler({
                 pollingInterval: 100
             })
 
-        return parseUserOpReceipt(opHash, receipt)
+        return parseUserOpReceipt(userOpHash, receipt)
     }
 })

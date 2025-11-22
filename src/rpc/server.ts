@@ -1,13 +1,14 @@
 import {
     type ApiVersion,
+    ERC7769Errors,
     type JSONRPCResponse,
     RpcError,
-    ValidationErrors,
     altoVersions,
     bundlerRequestSchema,
     jsonRpcSchema
 } from "@alto/types"
 import type { Metrics } from "@alto/utils"
+import cors from "@fastify/cors"
 import websocket from "@fastify/websocket"
 import * as sentry from "@sentry/node"
 import Fastify, {
@@ -60,11 +61,11 @@ JSON.stringify = (
 }
 
 export class Server {
-    private config: AltoConfig
-    private fastify: FastifyInstance
-    private rpcEndpoint: RpcHandler
-    private registry: Registry
-    private metrics: Metrics
+    private readonly config: AltoConfig
+    private readonly fastify: FastifyInstance
+    private readonly rpcEndpoint: RpcHandler
+    private readonly registry: Registry
+    private readonly metrics: Metrics
 
     constructor({
         config,
@@ -90,6 +91,9 @@ export class Server {
             requestTimeout: config.timeout,
             disableRequestLogging: true
         })
+        if (config.enableCors) {
+            this.fastify.register(cors, { origin: true })
+        }
 
         this.fastify.register(rpcDecorators)
 
@@ -179,7 +183,7 @@ export class Server {
     ): Promise<void> {
         try {
             request.body = JSON.parse(msgBuffer.toString())
-        } catch (err) {
+        } catch {
             socket.send(
                 JSON.stringify({
                     jsonrpc: "2.0",
@@ -187,7 +191,7 @@ export class Server {
                     error: {
                         message: "invalid JSON-RPC request",
                         data: msgBuffer.toString(),
-                        code: ValidationErrors.InvalidFields
+                        code: ERC7769Errors.InvalidFields
                     }
                 })
             )
@@ -215,16 +219,16 @@ export class Server {
             const error = fromZodError(versionParsingResult.error)
             throw new RpcError(
                 `invalid version ${error.message}`,
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
         const apiVersion: ApiVersion = versionParsingResult.data
 
-        if (this.config.apiVersion.indexOf(apiVersion) === -1) {
+        if (!this.config.apiVersion.includes(apiVersion)) {
             throw new RpcError(
                 `unsupported version ${apiVersion}`,
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
@@ -238,7 +242,7 @@ export class Server {
             ) {
                 throw new RpcError(
                     "invalid content-type, content-type must be application/json",
-                    ValidationErrors.InvalidFields
+                    ERC7769Errors.InvalidFields
                 )
             }
             this.fastify.log.trace(
@@ -251,7 +255,7 @@ export class Server {
                 const validationError = fromZodError(jsonRpcParsing.error)
                 throw new RpcError(
                     `invalid JSON-RPC request ${validationError.message}`,
-                    ValidationErrors.InvalidFields
+                    ERC7769Errors.InvalidFields
                 )
             }
 
@@ -273,13 +277,13 @@ export class Server {
                 ) {
                     throw new RpcError(
                         "Missing/invalid userOpHash",
-                        ValidationErrors.InvalidFields
+                        ERC7769Errors.InvalidFields
                     )
                 }
 
                 throw new RpcError(
                     validationError.message,
-                    ValidationErrors.InvalidRequest
+                    ERC7769Errors.InvalidRequest
                 )
             }
 
@@ -292,7 +296,7 @@ export class Server {
             ) {
                 throw new RpcError(
                     `Method not supported: ${bundlerRequest.method}`,
-                    ValidationErrors.InvalidRequest
+                    ERC7769Errors.InvalidRequest
                 )
             }
 

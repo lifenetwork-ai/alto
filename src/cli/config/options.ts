@@ -94,6 +94,12 @@ export const bundlerOptions: CliCommandOptions<IBundlerArgsInput> = {
         require: false,
         default: true
     },
+    "max-gas-per-user-op": {
+        description: "Maximum amount of gas per user operation",
+        type: "string",
+        require: false,
+        default: "20000000"
+    },
     "max-gas-per-bundle": {
         description: "Maximum amount of gas per bundle",
         type: "string",
@@ -185,12 +191,25 @@ export const mempoolOptions: CliCommandOptions<IMempoolArgsInput> = {
         require: false,
         default: 0
     },
+    "mempool-pop-batch-size": {
+        description:
+            "Number of user operations to pop from the mempool at once for bundling",
+        type: "number",
+        require: false,
+        default: 10
+    },
     "enforce-unique-senders-per-bundle": {
         description:
             "Include user ops with the same sender in the single bundle",
         type: "boolean",
         require: false,
         default: true
+    },
+    "ignored-paymasters": {
+        description:
+            "Comma-separated list of paymaster addresses to ignore when checking for queued user operations",
+        type: "string",
+        require: false
     }
 }
 
@@ -285,13 +304,6 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
             require: true,
             default: "110"
         },
-        "paymaster-gas-limit-multiplier": {
-            description:
-                "Amount to multiply the paymaster gas limits fetched from simulations",
-            type: "string",
-            require: true,
-            default: "110"
-        },
         "simulation-call-gas-limit": {
             description:
                 "UserOperation's callGasLimit used during gas estimation simulations",
@@ -330,16 +342,35 @@ export const gasEstimationOptions: CliCommandOptions<IGasEstimationArgsInput> =
                 "Should the bundler split estimation simulations into smaller calls.",
             type: "boolean",
             default: false
+        },
+        "call-gas-limit-floor": {
+            description:
+                "Minimum callGasLimit to enforce when there are queued user operations",
+            type: "string",
+            require: false,
+            default: "50000"
         }
     }
 
 export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
+    "max-bundle-count": {
+        description:
+            "Maximum number of bundles when calling mempool's process function",
+        type: "number",
+        require: false
+    },
     "resubmit-stuck-timeout": {
         description:
             "Amount of time before retrying a failed userOperation (in ms)",
         type: "number",
         require: true,
         default: 10_000
+    },
+    "max-resubmits": {
+        description:
+            "Maximum number of times to resubmit a userOperation before dropping it (optional, no limit if not set)",
+        type: "number",
+        require: false
     },
     "resubmit-multiplier-ceiling": {
         description:
@@ -365,12 +396,6 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         description: "Amount to scale the gas estimations used for bundling",
         type: "string",
         default: "100"
-    },
-    "no-profit-bundling": {
-        description:
-            "Bundle tx such that all beneficiary fees are spent on gas fees",
-        type: "boolean",
-        default: false
     },
     "refill-helper-contract": {
         description: "Address of the Executor refill helper contract",
@@ -437,13 +462,6 @@ export const executorOptions: CliCommandOptions<IExecutorArgsInput> = {
         require: false,
         default: "10"
     },
-    "arbitrum-gas-bid-multiplier": {
-        description:
-            "Multiplier for gas bid on Arbitrum networks to account for baseFee fluctuations",
-        type: "string",
-        require: false,
-        default: "5"
-    },
     "binary-search-max-retries": {
         description:
             "Maximum number of retries for binary search operations during gas estimation",
@@ -472,7 +490,8 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
                 "arbitrum",
                 "hedera",
                 "mantle",
-                "etherlink"
+                "etherlink",
+                "monad"
             ],
             default: "default"
         },
@@ -533,12 +552,32 @@ export const compatibilityOptions: CliCommandOptions<ICompatibilityArgsInput> =
             type: "string",
             require: false
         },
+        "static-max-priority-fee-per-gas": {
+            description:
+                "Static maxPriorityFeePerGas value (in gwei) instead of RPC estimation",
+            type: "string",
+            require: false
+        },
         "supports-eip7623": {
             description:
                 "Whether the chain supports EIP-7623 (Increase calldata cost to reduce maximum block size)",
             type: "boolean",
             require: false,
             default: false
+        },
+        "arbitrum-base-fee-multiplier": {
+            description:
+                "Multiplier for gas bids on Arbitrum networks to account for baseFee fluctuations",
+            type: "string",
+            require: false,
+            default: "5"
+        },
+        "monad-reserve-balance": {
+            description:
+                "Minimum balance (in wei) that must be reserved for Monad chain user operations without paymasters",
+            type: "string",
+            require: false,
+            default: "10000000000000000000"
         }
     }
 
@@ -723,6 +762,12 @@ export const debugOptions: CliCommandOptions<IDebugArgsInput> = {
         type: "boolean",
         require: true,
         default: true
+    },
+    "enable-cors": {
+        description: "Enable CORS for local bundler access",
+        type: "boolean",
+        require: true,
+        default: false
     }
 }
 

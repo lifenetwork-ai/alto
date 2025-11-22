@@ -33,15 +33,15 @@ export const createMemoryReceiptCache = (ttl: number): ReceiptCache => {
             return cached.receipt
         },
 
-        set: async (
-            userOpHash: Hex,
-            receipt: UserOperationReceipt
-        ): Promise<void> => {
+        cache: async (receipts: UserOperationReceipt[]): Promise<void> => {
             pruneExpired()
-            cache.set(userOpHash, {
-                receipt,
-                timestamp: Date.now()
-            })
+            const timestamp = Date.now()
+            for (const receipt of receipts) {
+                cache.set(receipt.userOpHash, {
+                    receipt,
+                    timestamp
+                })
+            }
         }
     }
 }

@@ -1,16 +1,18 @@
-import type { SenderManager } from "@alto/executor"
+import { type SenderManager, getUserOpHashes } from "@alto/executor"
 import type { EventManager, GasPriceManager } from "@alto/handlers"
 import type {
     InterfaceReputationManager,
     Mempool,
-    Monitor
+    StatusManager
 } from "@alto/mempool"
-import type { ReceiptCache } from "@alto/receiptCache"
-import { createReceiptCache } from "@alto/receiptCache"
-import type { HexData32, SubmittedBundleInfo, UserOpInfo } from "@alto/types"
-import type { UserOperationReceipt } from "@alto/types"
-import type { Logger, Metrics } from "@alto/utils"
-import { parseUserOpReceipt } from "@alto/utils"
+import { type ReceiptCache, createReceiptCache } from "@alto/receiptCache"
+import type {
+    HexData32,
+    SubmittedBundleInfo,
+    UserOpInfo,
+    UserOperationReceipt
+} from "@alto/types"
+import { type Logger, type Metrics, parseUserOpReceipt } from "@alto/utils"
 import {
     type Address,
     type Block,
@@ -28,23 +30,24 @@ import { filterOpsAndEstimateGas } from "./filterOpsAndEstimateGas"
 import { type BundleStatus, getBundleStatus } from "./getBundleStatus"
 
 export class BundleManager {
-    private reputationManager: InterfaceReputationManager
-    private config: AltoConfig
-    private mempool: Mempool
-    private monitor: Monitor
-    private logger: Logger
-    private metrics: Metrics
-    private eventManager: EventManager
-    private senderManager: SenderManager
+    private readonly reputationManager: InterfaceReputationManager
+    private readonly config: AltoConfig
+    private readonly mempool: Mempool
+    private readonly statusManager: StatusManager
+    private readonly logger: Logger
+    private readonly metrics: Metrics
+    private readonly eventManager: EventManager
+    private readonly senderManager: SenderManager
     private cachedLatestBlock: { value: bigint; timestamp: number } | null
-    private pendingBundles: Map<string, SubmittedBundleInfo> = new Map()
-    private receiptCache: ReceiptCache
-    private gasPriceManager: GasPriceManager
+    private readonly receiptCache: ReceiptCache
+    private readonly gasPriceManager: GasPriceManager
+    private readonly pendingBundles: Map<string, SubmittedBundleInfo> =
+        new Map()
 
     constructor({
         config,
         mempool,
-        monitor,
+        statusManager,
         metrics,
         reputationManager,
         eventManager,
@@ -53,7 +56,7 @@ export class BundleManager {
     }: {
         config: AltoConfig
         mempool: Mempool
-        monitor: Monitor
+        statusManager: StatusManager
         metrics: Metrics
         reputationManager: InterfaceReputationManager
         eventManager: EventManager
@@ -63,14 +66,14 @@ export class BundleManager {
         this.reputationManager = reputationManager
         this.config = config
         this.mempool = mempool
-        this.monitor = monitor
+        this.statusManager = statusManager
         this.metrics = metrics
         this.eventManager = eventManager
         this.senderManager = senderManager
         this.cachedLatestBlock = null
         this.gasPriceManager = gasPriceManager
         this.logger = config.getLogger(
-            { module: "userop_monitor" },
+            { module: "userop_status_manager" },
             {
                 level: config.executorLogLevel || config.logLevel
             }
@@ -117,27 +120,26 @@ export class BundleManager {
         // Cleanup bundle
         await this.freeSubmittedBundle(submittedBundle)
 
-        // Process each userOp
-        // rest of the code is non-blocking
+        // Process all userOps in parallel (non-blocking)
+        // The IIFE returns immediately, allowing the caller to continue
         return (async () => {
-            for (const userOpInfo of userOps) {
-                const userOpReceipt = userOpReceipts[userOpInfo.userOpHash]
+            const userOpsBatch = userOps.map((userOpInfo) => ({
+                userOpInfo,
+                userOpReceipt: userOpReceipts[userOpInfo.userOpHash]
+            }))
 
-                // Cache the receipt
-                await this.receiptCache.set(
-                    userOpInfo.userOpHash,
-                    userOpReceipt
-                )
+            // Batch cache receipts
+            const receipts = Object.values(userOpReceipts)
+            await this.receiptCache.cache(receipts)
 
-                await this.processIncludedUserOp(
-                    userOpInfo,
-                    userOpReceipt,
-                    transactionHash,
-                    blockNumber,
-                    entryPoint,
-                    blockReceivedTimestamp
-                )
-            }
+            // Batch process userOps
+            await this.processIncludedUserOps(
+                userOpsBatch,
+                transactionHash,
+                blockNumber,
+                entryPoint,
+                blockReceivedTimestamp
+            )
         })()
     }
 
@@ -162,6 +164,11 @@ export class BundleManager {
         const { bundle } = submittedBundle
         const { blockNumber, transactionHash } = bundleReceipt
 
+        this.logger.info(
+            { transactionHash, userOpHashes: getUserOpHashes(bundle.userOps) },
+            "Processing reverted bundle"
+        )
+
         await this.freeSubmittedBundle(submittedBundle)
 
         const networkBaseFee = this.config.legacyTransactions
@@ -173,6 +180,7 @@ export class BundleManager {
         return (async () => {
             // Find userOps that can be resubmitted
             const filterOpsResult = await filterOpsAndEstimateGas({
+                checkEip7702AuthNonces: true, // Check if any userOps reverted onchain due to invalid EIP-7702 auth nonce.
                 userOpBundle: bundle,
                 config: this.config,
                 logger: this.logger,
@@ -194,44 +202,46 @@ export class BundleManager {
 
             // Fire and forget
             // Check if any rejected userOps were frontruns, if not mark as reverted onchain.
-            rejectedUserOps.map(async (userOpInfo) => {
-                const status = await this.getUserOpStatus({
-                    userOpInfo,
-                    entryPoint: submittedBundle.bundle.entryPoint,
-                    bundlerTxs: [
-                        submittedBundle.transactionHash,
-                        ...submittedBundle.previousTransactionHashes
-                    ],
-                    blockReceivedTimestamp
-                })
-
-                if (status === "not_found") {
-                    const { userOpHash } = userOpInfo
-
-                    await this.monitor.setUserOpStatus(userOpHash, {
-                        status: "failed",
-                        transactionHash
+            for (const userOpInfo of rejectedUserOps) {
+                ;(async () => {
+                    const status = await this.getUserOpStatus({
+                        userOpInfo,
+                        entryPoint: submittedBundle.bundle.entryPoint,
+                        bundlerTxs: [
+                            submittedBundle.transactionHash,
+                            ...submittedBundle.previousTransactionHashes
+                        ],
+                        blockReceivedTimestamp
                     })
 
-                    this.eventManager.emitFailedOnChain(
-                        userOpHash,
-                        transactionHash,
-                        blockNumber
-                    )
+                    if (status === "not_found") {
+                        const { userOpHash } = userOpInfo
 
-                    this.logger.info(
-                        {
-                            userOpHash,
+                        await this.statusManager.set([userOpHash], {
+                            status: "failed",
                             transactionHash
-                        },
-                        "user op failed onchain"
-                    )
+                        })
 
-                    this.metrics.userOpsOnChain
-                        .labels({ status: "reverted" })
-                        .inc(1)
-                }
-            })
+                        this.eventManager.emitFailedOnChain(
+                            userOpHash,
+                            transactionHash,
+                            blockNumber
+                        )
+
+                        this.logger.info(
+                            {
+                                userOpHash,
+                                transactionHash
+                            },
+                            "user op failed onchain"
+                        )
+
+                        this.metrics.userOpsOnChain
+                            .labels({ status: "reverted" })
+                            .inc(1)
+                    }
+                })()
+            }
         })()
     }
 
@@ -260,7 +270,7 @@ export class BundleManager {
 
         this.stopTrackingBundle(submittedBundle)
         await this.senderManager.markWalletProcessed(executor)
-        await this.mempool.removeSubmittedUserOps({ entryPoint, userOps })
+        await this.mempool.removeProcessing({ entryPoint, userOps })
     }
 
     // Stop tracking bundle in event resubmit fails
@@ -268,62 +278,70 @@ export class BundleManager {
         this.pendingBundles.delete(submittedBundle.uid)
     }
 
-    private async processIncludedUserOp(
-        userOpInfo: UserOpInfo,
-        userOpReceipt: UserOperationReceipt,
+    private async processIncludedUserOps(
+        userOpsBatch: {
+            userOpInfo: UserOpInfo
+            userOpReceipt: UserOperationReceipt
+        }[],
         transactionHash: Hash,
         blockNumber: bigint,
         entryPoint: Address,
         blockReceivedTimestamp: number
     ) {
-        const { userOpHash, userOp, submissionAttempts, addedToMempool } =
-            userOpInfo
-
-        const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
-        this.logger.info(
-            { userOpHash, transactionHash, inclusionTimeMs },
-            "user op included"
+        // Update all statuses in one batch
+        await this.statusManager.set(
+            userOpsBatch.map(({ userOpInfo }) => userOpInfo.userOpHash),
+            {
+                status: "included",
+                transactionHash
+            }
         )
 
-        // Update status
-        await this.monitor.setUserOpStatus(userOpHash, {
-            status: "included",
-            transactionHash
-        })
+        // Process each userOp
+        for (const { userOpInfo, userOpReceipt } of userOpsBatch) {
+            const { userOpHash, userOp, submissionAttempts, addedToMempool } =
+                userOpInfo
 
-        // Log metric
-        this.metrics.userOpsOnChain.labels({ status: "included" }).inc()
-
-        // Emit appropriate event
-        if (userOpReceipt.success) {
-            this.eventManager.emitIncludedOnChain(
-                userOpHash,
-                transactionHash,
-                blockNumber
+            const inclusionTimeMs = blockReceivedTimestamp - addedToMempool
+            this.logger.info(
+                { userOpHash, transactionHash, inclusionTimeMs },
+                "user op included"
             )
-        } else {
-            this.eventManager.emitExecutionRevertedOnChain(
-                userOpHash,
-                transactionHash,
-                userOpReceipt.reason || "0x",
-                blockNumber
+
+            // Log metric
+            this.metrics.userOpsOnChain.labels({ status: "included" }).inc()
+
+            // Emit appropriate event
+            if (userOpReceipt.success) {
+                this.eventManager.emitIncludedOnChain(
+                    userOpHash,
+                    transactionHash,
+                    blockNumber
+                )
+            } else {
+                this.eventManager.emitExecutionRevertedOnChain(
+                    userOpHash,
+                    transactionHash,
+                    userOpReceipt.reason || "0x",
+                    blockNumber
+                )
+            }
+
+            // Track metrics
+            this.metrics.userOpInclusionDuration.observe(inclusionTimeMs / 1000)
+            this.metrics.userOpsSubmissionAttempts.observe(submissionAttempts)
+
+            // Update reputation
+            const accountDeployed = this.checkAccountDeployment(
+                userOpReceipt,
+                userOp.sender
+            )
+            this.reputationManager.updateUserOpIncludedStatus(
+                userOp,
+                entryPoint,
+                accountDeployed
             )
         }
-
-        // Track metrics
-        this.metrics.userOpInclusionDuration.observe(inclusionTimeMs / 1000)
-        this.metrics.userOpsSubmissionAttempts.observe(submissionAttempts)
-
-        // Update reputation
-        const accountDeployed = this.checkAccountDeployment(
-            userOpReceipt,
-            userOp.sender
-        )
-        this.reputationManager.updateUserOpIncludedStatus(
-            userOp,
-            entryPoint,
-            accountDeployed
-        )
     }
 
     async getUserOpStatus({
@@ -353,14 +371,10 @@ export class BundleManager {
                 const { blockNumber, transactionHash } = receipt
 
                 // Cache the receipt
-                await this.receiptCache.set(
-                    userOpInfo.userOpHash,
-                    userOpReceipt
-                )
+                await this.receiptCache.cache([userOpReceipt])
 
-                await this.processIncludedUserOp(
-                    userOpInfo,
-                    userOpReceipt,
+                await this.processIncludedUserOps(
+                    [{ userOpInfo, userOpReceipt }],
                     transactionHash,
                     blockNumber,
                     entryPoint,
@@ -375,7 +389,7 @@ export class BundleManager {
                 const transactionHash = userOpReceipt.receipt.transactionHash
                 const blockNumber = userOpReceipt.receipt.blockNumber
 
-                await this.monitor.setUserOpStatus(userOpHash, {
+                await this.statusManager.set([userOpHash], {
                     status: "included",
                     transactionHash
                 })
@@ -417,11 +431,11 @@ export class BundleManager {
                     )
                 }, this.config.publicClient.chain.blockTime ?? 1_000)
             })
-        } catch (error) {
+        } catch (err) {
             this.logger.error(
                 {
-                    userOpHash,
-                    error
+                    err,
+                    userOpHash
                 },
                 "Error checking frontrun status"
             )
@@ -546,7 +560,7 @@ export class BundleManager {
         const userOpReceipt = parseUserOpReceipt(userOpHash, receipt)
 
         // Cache the receipt before returning
-        await this.receiptCache.set(userOpHash, userOpReceipt)
+        await this.receiptCache.cache([userOpReceipt])
 
         return userOpReceipt
     }

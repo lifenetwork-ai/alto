@@ -32,10 +32,7 @@ export const bundlerArgsSchema = z.object({
     "min-entity-stake": z.number().int().min(0),
     "min-entity-unstake-delay": z.number().int().min(0),
 
-    "gas-price-bump": z
-        .string()
-        .transform((val) => BigInt(val))
-        .default("100"),
+    "gas-price-bump": z.string().transform(BigInt).default("100"),
     "gas-price-expiry": z.number().int().min(0),
     "gas-price-multipliers": z
         .string()
@@ -50,10 +47,8 @@ export const bundlerArgsSchema = z.object({
     "mempool-max-parallel-ops": z.number().int().min(0).default(10),
     "mempool-max-queued-ops": z.number().int().min(0).default(0),
     "enforce-unique-senders-per-bundle": z.boolean().default(true),
-    "max-gas-per-bundle": z
-        .string()
-        .transform((val) => BigInt(val))
-        .default("20000000"),
+    "max-gas-per-user-op": z.string().transform(BigInt).default("20000000"),
+    "max-gas-per-bundle": z.string().transform(BigInt).default("20000000"),
     "rpc-methods": z
         .string()
         .nullable()
@@ -91,19 +86,20 @@ export const bundlerArgsSchema = z.object({
 })
 
 export const executorArgsSchema = z.object({
+    "max-bundle-count": z.number().int().min(1).optional(),
     "resubmit-stuck-timeout": z.number().int().min(0).default(15_000),
+    "max-resubmits": z.number().int().min(0).optional(),
     "refilling-wallets": z.boolean().default(true),
     "refill-helper-contract": addressSchema.optional(),
-    "no-profit-bundling": z.boolean(),
     "utility-private-key": hexData32Schema
         .transform((val) => privateKeyToAccount(val) satisfies Account)
         .optional(),
     "utility-wallet-monitor": z.boolean(),
     "utility-wallet-monitor-interval": z.number(),
-    "resubmit-multiplier-ceiling": z.string().transform((val) => BigInt(val)),
+    "resubmit-multiplier-ceiling": z.string().transform(BigInt),
     "gas-limit-rounding-multiple": z
         .string()
-        .transform((val) => BigInt(val))
+        .transform(BigInt)
         .refine(
             (value) => value > 0n,
             "Gas limit rounding multiple must be a positive number"
@@ -129,24 +125,12 @@ export const executorArgsSchema = z.object({
             )
     ]),
     "max-executors": z.number().int().min(0).optional(),
-    "min-executor-balance": z
-        .string()
-        .transform((val) => BigInt(val))
-        .optional(),
+    "min-executor-balance": z.string().transform(BigInt).optional(),
     "executor-refill-interval": z.number().int().min(0),
-    "executor-gas-multiplier": z.string().transform((val) => BigInt(val)),
+    "executor-gas-multiplier": z.string().transform(BigInt),
     "send-handle-ops-retry-count": z.number().int().default(3),
-    "transaction-underpriced-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "bundler-initial-commission": z
-        .string()
-        .transform((val) => BigInt(val))
-        .default("10"),
-    "arbitrum-gas-bid-multiplier": z
-        .string()
-        .transform((val) => BigInt(val))
-        .default("5"),
+    "transaction-underpriced-multiplier": z.string().transform(BigInt),
+    "bundler-initial-commission": z.string().transform(BigInt).default("10"),
     "binary-search-max-retries": z.number().int().min(1).default(3),
     "private-endpoint-submission-attempts": z.number().int().min(0).default(3)
 })
@@ -158,7 +142,8 @@ export const compatibilityArgsSchema = z.object({
         "arbitrum",
         "hedera",
         "mantle",
-        "etherlink"
+        "etherlink",
+        "monad"
     ]),
     "legacy-transactions": z.boolean(),
     "api-version": z
@@ -174,10 +159,7 @@ export const compatibilityArgsSchema = z.object({
     "balance-override": z.boolean(),
     "flush-stuck-transactions-during-startup": z.boolean(),
     "is-gas-free-chain": z.boolean(),
-    "fixed-gas-limit-for-estimation": z
-        .string()
-        .transform((val) => BigInt(val))
-        .optional(),
+    "fixed-gas-limit-for-estimation": z.string().transform(BigInt).optional(),
     "floor-max-fee-per-gas": z
         .string()
         .transform((val) => parseGwei(val))
@@ -186,7 +168,16 @@ export const compatibilityArgsSchema = z.object({
         .string()
         .transform((val) => parseGwei(val))
         .optional(),
-    "supports-eip7623": z.boolean().default(false)
+    "static-max-priority-fee-per-gas": z
+        .string()
+        .transform((val) => parseGwei(val))
+        .optional(),
+    "supports-eip7623": z.boolean().default(false),
+    "arbitrum-base-fee-multiplier": z.string().transform(BigInt).default("150"),
+    "monad-reserve-balance": z
+        .string()
+        .transform(BigInt)
+        .default("10000000000000000000")
 })
 
 export const serverArgsSchema = z.object({
@@ -230,7 +221,8 @@ export const debugArgsSchema = z.object({
     "enable-debug-endpoints": z.boolean(),
     "expiration-check": z.boolean(),
     "dangerous-skip-user-operation-validation": z.boolean(),
-    "deploy-simulations-contract": z.boolean()
+    "deploy-simulations-contract": z.boolean(),
+    "enable-cors": z.boolean()
 })
 
 export const gasEstimationArgsSchema = z.object({
@@ -248,47 +240,29 @@ export const gasEstimationArgsSchema = z.object({
     ),
     "binary-search-tolerance-delta": z
         .string()
-        .transform((val) => BigInt(val))
+        .transform(BigInt)
         .default("1000"),
     "binary-search-gas-allowance": z
         .string()
-        .transform((val) => BigInt(val))
+        .transform(BigInt)
         .default("1000000"),
-    "v6-call-gas-limit-multiplier": z.string().transform((val) => BigInt(val)),
-    "v6-verification-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "v6-pre-verification-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "v7-call-gas-limit-multiplier": z.string().transform((val) => BigInt(val)),
-    "v7-verification-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
+    "v6-call-gas-limit-multiplier": z.string().transform(BigInt),
+    "v6-verification-gas-limit-multiplier": z.string().transform(BigInt),
+    "v6-pre-verification-gas-limit-multiplier": z.string().transform(BigInt),
+    "v7-call-gas-limit-multiplier": z.string().transform(BigInt),
+    "v7-verification-gas-limit-multiplier": z.string().transform(BigInt),
     "v7-paymaster-verification-gas-limit-multiplier": z
         .string()
-        .transform((val) => BigInt(val)),
-    "v7-paymaster-post-op-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "v7-pre-verification-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "simulation-call-gas-limit": z.string().transform((val) => BigInt(val)),
-    "simulation-verification-gas-limit": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "simulation-paymaster-verification-gas-limit": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "simulation-paymaster-post-op-gas-limit": z
-        .string()
-        .transform((val) => BigInt(val)),
-    "paymaster-gas-limit-multiplier": z
-        .string()
-        .transform((val) => BigInt(val)),
+        .transform(BigInt),
+    "v7-paymaster-post-op-gas-limit-multiplier": z.string().transform(BigInt),
+    "v7-pre-verification-gas-limit-multiplier": z.string().transform(BigInt),
+    "simulation-call-gas-limit": z.string().transform(BigInt),
+    "simulation-verification-gas-limit": z.string().transform(BigInt),
+    "simulation-paymaster-verification-gas-limit": z.string().transform(BigInt),
+    "simulation-paymaster-post-op-gas-limit": z.string().transform(BigInt),
     "eth-call-sender-address": addressSchema.optional(),
-    "split-simulation-calls": z.boolean()
+    "split-simulation-calls": z.boolean(),
+    "call-gas-limit-floor": z.string().transform(BigInt).default("50000")
 })
 
 export const mempoolArgsSchema = z.object({
@@ -299,7 +273,18 @@ export const mempoolArgsSchema = z.object({
         .default(30 * 60 * 1000), // Default 30 minutes
     "mempool-max-parallel-ops": z.number().int().min(0).default(10),
     "mempool-max-queued-ops": z.number().int().min(0).default(0),
-    "enforce-unique-senders-per-bundle": z.boolean().default(true)
+    "mempool-pop-batch-size": z.number().int().min(1).default(10),
+    "enforce-unique-senders-per-bundle": z.boolean().default(true),
+    "ignored-paymasters": z
+        .string()
+        .optional()
+        .transform((val) => {
+            if (!val) return []
+            return val
+                .split(",")
+                .map((address) => addressSchema.parse(address.trim()))
+        })
+        .default("")
 })
 
 export const redisArgsSchema = z.object({

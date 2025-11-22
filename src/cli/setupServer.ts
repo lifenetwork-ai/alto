@@ -3,11 +3,12 @@ import { EventManager, type GasPriceManager } from "@alto/handlers"
 import {
     type InterfaceReputationManager,
     Mempool,
-    Monitor,
     NullReputationManager,
-    ReputationManager
+    ReputationManager,
+    StatusManager
 } from "@alto/mempool"
 import { RpcHandler, SafeValidator, Server, UnsafeValidator } from "@alto/rpc"
+import { createMempoolStore } from "@alto/store"
 import type { InterfaceValidator } from "@alto/types"
 import type { Metrics } from "@alto/utils"
 import type { Registry } from "prom-client"
@@ -15,7 +16,6 @@ import type { AltoConfig } from "../createConfig"
 import { BundleManager } from "../executor/bundleManager"
 import { flushOnStartUp } from "../executor/senderManager/flushOnStartUp"
 import { validateAndRefillWallets } from "../executor/senderManager/validateAndRefill"
-import { createMempoolStore } from "../store/createMempoolStore"
 import { persistShutdownState, restoreShutdownState } from "./shutDown"
 
 const getReputationManager = (
@@ -53,20 +53,22 @@ const getValidator = ({
     })
 }
 
-const getMonitor = ({ config }: { config: AltoConfig }): Monitor => {
-    return new Monitor({ config })
+const getStatusManager = ({
+    config
+}: { config: AltoConfig }): StatusManager => {
+    return new StatusManager({ config })
 }
 
 const getMempool = ({
     config,
-    monitor,
+    statusManager,
     reputationManager,
     validator,
     metrics,
     eventManager
 }: {
     config: AltoConfig
-    monitor: Monitor
+    statusManager: StatusManager
     reputationManager: InterfaceReputationManager
     validator: InterfaceValidator
     metrics: Metrics
@@ -74,7 +76,7 @@ const getMempool = ({
 }): Mempool => {
     return new Mempool({
         config,
-        monitor,
+        statusManager,
         metrics,
         store: createMempoolStore({ config, metrics }),
         reputationManager,
@@ -139,7 +141,7 @@ const getRpcHandler = ({
     validator,
     mempool,
     executor,
-    monitor,
+    statusManager,
     executorManager,
     reputationManager,
     bundleManager,
@@ -151,7 +153,7 @@ const getRpcHandler = ({
     validator: InterfaceValidator
     mempool: Mempool
     executor: Executor
-    monitor: Monitor
+    statusManager: StatusManager
     executorManager: ExecutorManager
     reputationManager: InterfaceReputationManager
     bundleManager: BundleManager
@@ -164,7 +166,7 @@ const getRpcHandler = ({
         validator,
         mempool,
         executor,
-        monitor,
+        statusManager,
         executorManager,
         reputationManager,
         bundleManager,
@@ -257,10 +259,10 @@ export const setupServer = async ({
         }, config.executorRefillInterval * 1000)
     }
 
-    const monitor = getMonitor({ config })
+    const statusManager = getStatusManager({ config })
     const mempool = getMempool({
         config,
-        monitor,
+        statusManager,
         reputationManager,
         validator,
         metrics,
@@ -275,7 +277,7 @@ export const setupServer = async ({
     const bundleManager = new BundleManager({
         config,
         mempool,
-        monitor,
+        statusManager,
         metrics,
         reputationManager,
         gasPriceManager,
@@ -298,7 +300,7 @@ export const setupServer = async ({
         validator,
         mempool,
         executor,
-        monitor,
+        statusManager,
         executorManager,
         reputationManager,
         bundleManager,
@@ -342,6 +344,7 @@ export const setupServer = async ({
         restoreShutdownState({
             mempool,
             bundleManager,
+            statusManager,
             config,
             logger: shutdownLogger,
             senderManager
@@ -349,6 +352,7 @@ export const setupServer = async ({
     }
 
     server.start()
+    executorManager.start()
 
     const gracefulShutdown = async (signal: string) => {
         rootLogger.info(`${signal} received, shutting down`)
@@ -360,6 +364,7 @@ export const setupServer = async ({
             mempool,
             config,
             bundleManager,
+            statusManager,
             logger: shutdownLogger
         })
 

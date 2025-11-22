@@ -10,23 +10,20 @@ import {
 import {
     type Address,
     type Hex,
-    type PublicClient,
     type TransactionReceipt,
     concat,
     decodeEventLog,
-    encodeAbiParameters,
     getAbiItem,
     getAddress,
-    keccak256,
     pad,
     size,
     slice,
     toHex,
     zeroAddress
 } from "viem"
-import { entryPoint07Abi } from "viem/account-abstraction"
+import { entryPoint07Abi, getUserOperationHash } from "viem/account-abstraction"
 import { z } from "zod"
-import { getAuthorizationStateOverrides } from "./helpers"
+import { getEip7702AuthAddress } from "./eip7702"
 
 // Type predicate check if the UserOperation is V06.
 export function isVersion06(
@@ -50,7 +47,16 @@ export function isVersion08(
     return entryPointAddress.startsWith("0x4337")
 }
 
-export function getInitCode(unpackedUserOp: UserOperation07) {
+// Check if a userOperation is a deployment operation
+export function isDeployment(userOp: UserOperation): boolean {
+    const isV6Deployment =
+        isVersion06(userOp) && !!userOp.initCode && userOp.initCode !== "0x"
+    const isV7Deployment =
+        isVersion07(userOp) && !!userOp.factory && userOp.factory !== "0x"
+    return isV6Deployment || isV7Deployment
+}
+
+function getInitCode(unpackedUserOp: UserOperation07) {
     return unpackedUserOp.factory
         ? concat([
               unpackedUserOp.factory === "0x7702"
@@ -64,7 +70,7 @@ export function getInitCode(unpackedUserOp: UserOperation07) {
         : "0x"
 }
 
-export function unPackInitCode(initCode: Hex) {
+function unPackInitCode(initCode: Hex) {
     if (initCode === "0x") {
         return {
             factory: null,
@@ -78,7 +84,7 @@ export function unPackInitCode(initCode: Hex) {
     }
 }
 
-export function getAccountGasLimits(unpackedUserOp: UserOperation07) {
+function getAccountGasLimits(unpackedUserOp: UserOperation07) {
     return concat([
         pad(toHex(unpackedUserOp.verificationGasLimit), {
             size: 16
@@ -87,14 +93,14 @@ export function getAccountGasLimits(unpackedUserOp: UserOperation07) {
     ])
 }
 
-export function unpackAccountGasLimits(accountGasLimits: Hex) {
+function unpackAccountGasLimits(accountGasLimits: Hex) {
     return {
         verificationGasLimit: BigInt(slice(accountGasLimits, 0, 16)),
         callGasLimit: BigInt(slice(accountGasLimits, 16))
     }
 }
 
-export function getGasLimits(unpackedUserOp: UserOperation07) {
+function getGasLimits(unpackedUserOp: UserOperation07) {
     return concat([
         pad(toHex(unpackedUserOp.maxPriorityFeePerGas), {
             size: 16
@@ -103,14 +109,14 @@ export function getGasLimits(unpackedUserOp: UserOperation07) {
     ])
 }
 
-export function unpackGasLimits(gasLimits: Hex) {
+function unpackGasLimits(gasLimits: Hex) {
     return {
         maxPriorityFeePerGas: BigInt(slice(gasLimits, 0, 16)),
         maxFeePerGas: BigInt(slice(gasLimits, 16))
     }
 }
 
-export function getPaymasterAndData(unpackedUserOp: UserOperation07) {
+function getPaymasterAndData(unpackedUserOp: UserOperation07) {
     return unpackedUserOp.paymaster
         ? concat([
               unpackedUserOp.paymaster,
@@ -125,7 +131,7 @@ export function getPaymasterAndData(unpackedUserOp: UserOperation07) {
         : "0x"
 }
 
-export function unpackPaymasterAndData(paymasterAndData: Hex) {
+function unpackPaymasterAndData(paymasterAndData: Hex) {
     if (paymasterAndData === "0x") {
         return {
             paymaster: null,
@@ -203,263 +209,71 @@ export function getAddressFromInitCodeOrPaymasterAndData(
     return null
 }
 
-export const getUserOpHashV06 = ({
+export function getUserOpHash({
     userOp,
     entryPointAddress,
     chainId
-}: {
-    userOp: UserOperation06
-    entryPointAddress: Address
-    chainId: number
-}) => {
-    const hash = keccak256(
-        encodeAbiParameters(
-            [
-                {
-                    name: "sender",
-                    type: "address"
-                },
-                {
-                    name: "nonce",
-                    type: "uint256"
-                },
-                {
-                    name: "initCodeHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "callDataHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "callGasLimit",
-                    type: "uint256"
-                },
-                {
-                    name: "verificationGasLimit",
-                    type: "uint256"
-                },
-                {
-                    name: "preVerificationGas",
-                    type: "uint256"
-                },
-                {
-                    name: "maxFeePerGas",
-                    type: "uint256"
-                },
-                {
-                    name: "maxPriorityFeePerGas",
-                    type: "uint256"
-                },
-                {
-                    name: "paymasterAndDataHash",
-                    type: "bytes32"
-                }
-            ],
-            [
-                userOp.sender,
-                userOp.nonce,
-                keccak256(userOp.initCode),
-                keccak256(userOp.callData),
-                userOp.callGasLimit,
-                userOp.verificationGasLimit,
-                userOp.preVerificationGas,
-                userOp.maxFeePerGas,
-                userOp.maxPriorityFeePerGas,
-                keccak256(userOp.paymasterAndData)
-            ]
-        )
-    )
-
-    return keccak256(
-        encodeAbiParameters(
-            [
-                {
-                    name: "userOpHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "entryPointAddress",
-                    type: "address"
-                },
-                {
-                    name: "chainId",
-                    type: "uint256"
-                }
-            ],
-            [hash, entryPointAddress, BigInt(chainId)]
-        )
-    )
-}
-
-export const getUserOpHashV07 = ({
-    userOp,
-    entryPointAddress,
-    chainId
-}: {
-    userOp: PackedUserOperation
-    entryPointAddress: Address
-    chainId: number
-}) => {
-    const hash = keccak256(
-        encodeAbiParameters(
-            [
-                {
-                    name: "sender",
-                    type: "address"
-                },
-                {
-                    name: "nonce",
-                    type: "uint256"
-                },
-                {
-                    name: "initCodeHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "callDataHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "accountGasLimits",
-                    type: "bytes32"
-                },
-                {
-                    name: "preVerificationGas",
-                    type: "uint256"
-                },
-                {
-                    name: "gasFees",
-                    type: "bytes32"
-                },
-                {
-                    name: "paymasterAndDataHash",
-                    type: "bytes32"
-                }
-            ],
-            [
-                userOp.sender,
-                userOp.nonce,
-                keccak256(userOp.initCode),
-                keccak256(userOp.callData),
-                userOp.accountGasLimits,
-                userOp.preVerificationGas,
-                userOp.gasFees,
-                keccak256(userOp.paymasterAndData)
-            ]
-        )
-    )
-
-    return keccak256(
-        encodeAbiParameters(
-            [
-                {
-                    name: "userOpHash",
-                    type: "bytes32"
-                },
-                {
-                    name: "entryPointAddress",
-                    type: "address"
-                },
-                {
-                    name: "chainId",
-                    type: "uint256"
-                }
-            ],
-            [hash, entryPointAddress, BigInt(chainId)]
-        )
-    )
-}
-
-export const getUserOpHashV08 = async ({
-    userOp,
-    entryPointAddress,
-    publicClient
-}: {
-    userOp: UserOperation07
-    entryPointAddress: Address
-    chainId: number
-    publicClient: PublicClient
-}) => {
-    const packedUserOp = toPackedUserOp(userOp)
-
-    // : concat(["0xef0100", code ?? "0x"])
-    const stateOverrides = getAuthorizationStateOverrides({
-        userOps: [userOp]
-    })
-
-    const hash = await publicClient.readContract({
-        address: entryPointAddress,
-        abi: [
-            {
-                inputs: [
-                    {
-                        components: [
-                            { name: "sender", type: "address" },
-                            { name: "nonce", type: "uint256" },
-                            { name: "initCode", type: "bytes" },
-                            { name: "callData", type: "bytes" },
-                            { name: "accountGasLimits", type: "bytes32" },
-                            { name: "preVerificationGas", type: "uint256" },
-                            { name: "gasFees", type: "bytes32" },
-                            { name: "paymasterAndData", type: "bytes" },
-                            { name: "signature", type: "bytes" }
-                        ],
-                        name: "userOp",
-                        type: "tuple"
-                    }
-                ],
-                name: "getUserOpHash",
-                outputs: [{ name: "", type: "bytes32" }],
-                stateMutability: "view",
-                type: "function"
-            }
-        ],
-        functionName: "getUserOpHash",
-        args: [packedUserOp],
-        stateOverride: [
-            ...Object.keys(stateOverrides).map((address) => ({
-                address: address as Address,
-                code: stateOverrides[address as Address]?.code ?? "0x"
-            }))
-        ]
-    })
-
-    return hash
-}
-
-export const getUserOpHash = ({
-    userOp,
-    entryPointAddress,
-    chainId,
-    publicClient
 }: {
     userOp: UserOperation
     entryPointAddress: Address
     chainId: number
-    publicClient: PublicClient
-}) => {
-    if (isVersion06(userOp)) {
-        return getUserOpHashV06({
-            userOp,
-            entryPointAddress,
-            chainId
-        })
-    }
-
+}): Hex {
     if (isVersion08(userOp, entryPointAddress)) {
-        return getUserOpHashV08({
-            userOp,
-            entryPointAddress,
+        const authorization = userOp.eip7702Auth
+            ? {
+                  address: getEip7702AuthAddress(userOp.eip7702Auth),
+                  chainId: userOp.eip7702Auth.chainId,
+                  nonce: userOp.eip7702Auth.nonce,
+                  r: userOp.eip7702Auth.r,
+                  s: userOp.eip7702Auth.s,
+                  yParity: userOp.eip7702Auth.yParity,
+                  v: userOp.eip7702Auth.v
+              }
+            : undefined
+
+        return getUserOperationHash({
             chainId,
-            publicClient
+            entryPointAddress,
+            entryPointVersion: "0.8",
+            userOperation: {
+                ...userOp,
+                paymaster: userOp.paymaster ?? undefined,
+                paymasterData: userOp.paymasterData ?? undefined,
+                paymasterVerificationGasLimit:
+                    userOp.paymasterVerificationGasLimit ?? undefined,
+                paymasterPostOpGasLimit:
+                    userOp.paymasterPostOpGasLimit ?? undefined,
+                factory: userOp.factory ?? undefined,
+                factoryData: userOp.factoryData ?? undefined,
+                authorization
+            }
         })
     }
 
-    return getUserOpHashV07({
-        userOp: toPackedUserOp(userOp),
+    if (isVersion07(userOp)) {
+        return getUserOperationHash({
+            chainId,
+            entryPointAddress,
+            entryPointVersion: "0.7",
+            userOperation: {
+                ...userOp,
+                paymaster: userOp.paymaster ?? undefined,
+                paymasterData: userOp.paymasterData ?? undefined,
+                paymasterPostOpGasLimit:
+                    userOp.paymasterPostOpGasLimit ?? undefined,
+                paymasterVerificationGasLimit:
+                    userOp.paymasterVerificationGasLimit ?? undefined,
+                factory: userOp.factory ?? undefined,
+                factoryData: userOp.factoryData ?? undefined
+            }
+        })
+    }
+
+    return getUserOperationHash({
+        chainId,
         entryPointAddress,
-        chainId
+        entryPointVersion: "0.6",
+        userOperation: userOp
     })
 }
 
@@ -468,6 +282,40 @@ export const getNonceKeyAndSequence = (nonce: bigint) => {
     const nonceSequence = nonce & 0xffffffffffffffffn // last 64 bits of nonce
 
     return [nonceKey, nonceSequence]
+}
+
+// Check if a userOperation has a paymaster
+export function hasPaymaster(userOp: UserOperation): boolean {
+    if (isVersion06(userOp)) {
+        return !!userOp.paymasterAndData && userOp.paymasterAndData !== "0x"
+    }
+    return !!userOp.paymaster && userOp.paymaster !== "0x"
+}
+
+export function calculateRequiredPrefund(userOp: UserOperation): bigint {
+    if (isVersion06(userOp)) {
+        const mul = hasPaymaster(userOp) ? 3n : 1n
+        const requiredGas =
+            userOp.callGasLimit +
+            userOp.verificationGasLimit * mul +
+            userOp.preVerificationGas
+
+        return requiredGas * userOp.maxFeePerGas
+    }
+
+    // v0.7/v0.8 logic: sum all gas limits directly
+    const paymasterVerificationGasLimit =
+        userOp.paymasterVerificationGasLimit ?? 0n
+    const paymasterPostOpGasLimit = userOp.paymasterPostOpGasLimit ?? 0n
+
+    const requiredGas =
+        userOp.verificationGasLimit +
+        userOp.callGasLimit +
+        paymasterVerificationGasLimit +
+        paymasterPostOpGasLimit +
+        userOp.preVerificationGas
+
+    return requiredGas * userOp.maxFeePerGas
 }
 
 export function toUnpackedUserOp(
@@ -575,7 +423,7 @@ export function parseUserOpReceipt(
                 // Update startIndex to this UserOpEvent for the next UserOp's logs
                 startIndex = index
             }
-        } catch (e) {}
+        } catch {}
     }
 
     if (userOpEventIndex === -1 || startIndex === -1 || !userOpEventArgs) {

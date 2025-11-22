@@ -2,26 +2,26 @@ import type { AltoConfig } from "../createConfig"
 import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 
 export class MantleManager {
-    private tokenRatioQueue: MinMaxQueue
-    private scalarQueue: MinMaxQueue
-    private rollupDataGasAndOverheadQueue: MinMaxQueue
-    private l1GasPriceQueue: MinMaxQueue
+    private readonly tokenRatioQueue: MinMaxQueue
+    private readonly scalarQueue: MinMaxQueue
+    private readonly rollupDataGasAndOverheadQueue: MinMaxQueue
+    private readonly l1GasPriceQueue: MinMaxQueue
 
     constructor({ config }: { config: AltoConfig }) {
         this.tokenRatioQueue = createMinMaxQueue({
-            keyPrefix: "token-ratio-queue",
+            queueName: "token-ratio-queue",
             config
         })
         this.scalarQueue = createMinMaxQueue({
-            keyPrefix: "scalar-queue",
+            queueName: "scalar-queue",
             config
         })
         this.l1GasPriceQueue = createMinMaxQueue({
-            keyPrefix: "l1-gas-price-queue",
+            queueName: "l1-gas-price-queue",
             config
         })
         this.rollupDataGasAndOverheadQueue = createMinMaxQueue({
-            keyPrefix: "rollup-data-gas-and-overhead-queue",
+            queueName: "rollup-data-gas-and-overhead-queue",
             config
         })
     }

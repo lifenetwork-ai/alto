@@ -1,15 +1,13 @@
 import type { GasPriceManager } from "@alto/handlers"
 import {
-    ExecutionErrors,
+    ERC7769Errors,
     RpcError,
     type StateOverrides,
     type UserOperation07,
-    ValidationErrors,
     pimlicoSimulationsAbi
 } from "@alto/types"
 import { type Logger, isVersion08, toPackedUserOp } from "@alto/utils"
-import type { Hex } from "viem"
-import { type Address, type StateOverride, getContract } from "viem"
+import { type Address, type Hex, type StateOverride, getContract } from "viem"
 import type { AltoConfig } from "../../createConfig"
 import { packUserOps } from "../../executor/utils"
 import {
@@ -36,9 +34,9 @@ type SimulateHandleOpSuccessResult = {
 }
 
 export class GasEstimator07 {
-    private config: AltoConfig
-    private logger: Logger
-    private gasPriceManager: GasPriceManager
+    private readonly config: AltoConfig
+    private readonly logger: Logger
+    private readonly gasPriceManager: GasPriceManager
 
     constructor(config: AltoConfig, gasPriceManager: GasPriceManager) {
         this.config = config
@@ -74,7 +72,7 @@ export class GasEstimator07 {
             this.logger.warn("pimlicoSimulation must be provided")
             throw new RpcError(
                 "pimlicoSimulation must be provided",
-                ValidationErrors.InvalidFields
+                ERC7769Errors.InvalidFields
             )
         }
 
@@ -112,17 +110,14 @@ export class GasEstimator07 {
     }): Promise<SimulateBinarySearchResult> {
         const { pimlicoSimulation, epSimulationsAddress } =
             this.getSimulationContracts(entryPoint, targetUserOp)
+
         // Check if we've hit the retry limit
         if (retryCount > this.config.binarySearchMaxRetries) {
             this.logger.warn(
                 { methodName, retryCount },
                 "Max retries reached in binary search"
             )
-            return {
-                result: "failed",
-                data: `Max retries reached when calling ${methodName}`,
-                code: ValidationErrors.SimulateValidation
-            }
+            throw new Error(`Max retries reached when calling ${methodName}`)
         }
 
         const packedQueuedOps = packUserOps(queuedUserOps)
@@ -178,18 +173,25 @@ export class GasEstimator07 {
             return {
                 result: "failed",
                 data: result.successData.returnData,
-                code: ExecutionErrors.UserOperationReverted
+                code: ERC7769Errors.UserOperationReverted
             }
         } catch (error) {
+            const decoded = decodeSimulateHandleOpError(error, this.logger)
+
+            if (decoded.result === "failed") {
+                return {
+                    result: "failed",
+                    data: decoded.data,
+                    code: decoded.code
+                }
+            }
+
             this.logger.warn(
                 { err: error, methodName },
                 "Error in performBinarySearch"
             )
-            return {
-                result: "failed",
-                data: "Unknown error, could not parse target call data result.",
-                code: ExecutionErrors.UserOperationReverted
-            } as const
+
+            throw new Error("Error in performBinarySearch")
         }
     }
 
@@ -230,12 +232,7 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
-            this.logger.warn(
-                { err: error, data: decodedError.data },
-                "Contract function reverted in executeSimulateHandleOp"
-            )
-            return decodedError
+            return decodeSimulateHandleOpError(error, this.logger)
         }
     }
 
@@ -327,7 +324,7 @@ export class GasEstimator07 {
                 return {
                     result: "failed",
                     data: verificationGasLimit.successData.returnData,
-                    code: ExecutionErrors.UserOperationReverted
+                    code: ERC7769Errors.UserOperationReverted
                 }
             }
 
@@ -366,7 +363,7 @@ export class GasEstimator07 {
                 return {
                     result: "failed",
                     data: paymasterVerificationGasLimit.successData.returnData,
-                    code: ExecutionErrors.UserOperationReverted
+                    code: ERC7769Errors.UserOperationReverted
                 }
             }
 
@@ -378,10 +375,6 @@ export class GasEstimator07 {
             }
         } catch (error) {
             const decodedError = decodeSimulateHandleOpError(error, this.logger)
-            this.logger.warn(
-                { err: error, data: decodedError.data },
-                "Contract function reverted in simulateValidation"
-            )
             return decodedError as {
                 result: "failed"
                 data: string
@@ -428,12 +421,7 @@ export class GasEstimator07 {
                 data: result
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
-            this.logger.warn(
-                { err: error, data: decodedError.data },
-                "Contract function reverted in simulateValidation"
-            )
-            return decodedError
+            return decodeSimulateHandleOpError(error, this.logger)
         }
     }
 
@@ -446,7 +434,7 @@ export class GasEstimator07 {
         entryPoint: Address
         userOp: UserOperation07
         queuedUserOps: UserOperation07[]
-        stateOverrides?: StateOverrides | undefined
+        stateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult> {
         const { epSimulationsAddress, pimlicoSimulation } =
             this.getSimulationContracts(entryPoint, userOp)
@@ -485,12 +473,7 @@ export class GasEstimator07 {
                 }
             }
         } catch (error) {
-            const decodedError = decodeSimulateHandleOpError(error, this.logger)
-            this.logger.warn(
-                { err: error, data: decodedError.data },
-                "Contract function reverted in validateHandleOpV07"
-            )
-            return decodedError
+            return decodeSimulateHandleOpError(error, this.logger)
         }
     }
 
@@ -503,7 +486,7 @@ export class GasEstimator07 {
         entryPoint: Address
         userOp: UserOperation07
         queuedUserOps: UserOperation07[]
-        userStateOverrides?: StateOverrides | undefined
+        userStateOverrides?: StateOverrides
     }): Promise<SimulateHandleOpResult> {
         const viemStateOverride = await prepareSimulationOverrides07({
             userOp,

@@ -1,6 +1,6 @@
 import type { StateOverrides, UserOperation } from "@alto/types"
-import { BaseError, type RawContractError, concat, getAddress } from "viem"
-import type { SignedAuthorization } from "viem"
+import { type SignedAuthorization, concat, getAddress } from "viem"
+import { getEip7702AuthAddress } from "./eip7702"
 
 /// Convert an object to JSON string, handling bigint values
 export const jsonStringifyWithBigint = (obj: unknown): string => {
@@ -50,14 +50,6 @@ export const areAddressesEqual = (a: string, b: string) => {
     }
 }
 
-export function getRevertErrorData(err: unknown) {
-    if (!(err instanceof BaseError)) {
-        return undefined
-    }
-    const error = err.walk() as RawContractError
-    return typeof error?.data === "object" ? error.data?.data : error.data
-}
-
 export function getAAError(errorMsg: string) {
     const uppercase = errorMsg.toUpperCase()
     const match = uppercase.match(/AA\d{2}/)
@@ -89,10 +81,7 @@ export function getAuthorizationStateOverrides({
                 ...(overrides[op.sender] || {}),
                 ...getAuthorizationStateOverride({
                     authorization: {
-                        address:
-                            "address" in op.eip7702Auth
-                                ? op.eip7702Auth.address
-                                : op.eip7702Auth.contractAddress,
+                        address: getEip7702AuthAddress(op.eip7702Auth),
                         chainId: op.eip7702Auth.chainId,
                         nonce: op.eip7702Auth.nonce,
                         r: op.eip7702Auth.r,

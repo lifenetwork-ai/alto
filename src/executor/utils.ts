@@ -10,6 +10,7 @@ import {
     type Logger,
     isVersion06,
     isVersion07,
+    scaleBigIntByPercent,
     toPackedUserOp
 } from "@alto/utils"
 import * as sentry from "@sentry/node"
@@ -18,11 +19,55 @@ import {
     type Address,
     type BaseError,
     type Hex,
+    type SignedAuthorizationList,
     encodeFunctionData,
     toBytes
 } from "viem"
-import type { SignedAuthorizationList } from "viem"
 import type { AltoConfig } from "../createConfig"
+import { getEip7702AuthAddress } from "../utils/eip7702"
+
+export const getBundleGasLimit = async ({
+    config,
+    userOps,
+    entryPoint,
+    executorAddress
+}: {
+    config: AltoConfig
+    userOps: UserOperation[]
+    entryPoint: Address
+    executorAddress: Address
+}): Promise<bigint> => {
+    const { rpcGasEstimate, publicClient } = config
+
+    let gasLimit: bigint
+
+    // On some chains we can't rely on local calculations and have to estimate the gasLimit from RPC
+    if (rpcGasEstimate) {
+        gasLimit = await publicClient.estimateGas({
+            to: entryPoint,
+            account: executorAddress,
+            data: encodeHandleOpsCalldata({
+                userOps: userOps,
+                beneficiary: executorAddress
+            })
+        })
+    } else {
+        const aa95GasFloor = calculateAA95GasFloor({
+            userOps: userOps,
+            beneficiary: executorAddress
+        })
+
+        const eip7702UserOpCount = userOps.filter(
+            (userOp) => userOp.eip7702Auth
+        ).length
+        const eip7702Overhead = BigInt(eip7702UserOpCount) * 40_000n
+
+        // Add 5% safety margin to local estimates.
+        gasLimit = scaleBigIntByPercent(aa95GasFloor + eip7702Overhead, 105n)
+    }
+
+    return gasLimit
+}
 
 export const isTransactionUnderpricedError = (e: BaseError) => {
     const transactionUnderPriceError = e.walk((e: any) =>
@@ -106,7 +151,7 @@ export const packUserOps = (userOps: UserOperation[]) => {
     const isV06 = isVersion06(userOps[0])
     const packedUserOps = isV06
         ? userOps
-        : userOps.map((op) => toPackedUserOp(op as UserOperation07))
+        : userOps.map((userOp) => toPackedUserOp(userOp as UserOperation07))
     return packedUserOps as PackedUserOperation[]
 }
 
@@ -130,26 +175,25 @@ export const encodeHandleOpsCalldata = ({
 export const getAuthorizationList = (
     userOpInfos: UserOpInfo[]
 ): SignedAuthorizationList | undefined => {
-    const authList = userOpInfos
-        .map(({ userOp }) => userOp)
-        .map(({ eip7702Auth }) =>
-            eip7702Auth
-                ? {
-                      address:
-                          "address" in eip7702Auth
-                              ? eip7702Auth.address
-                              : eip7702Auth.contractAddress,
-                      chainId: eip7702Auth.chainId,
-                      nonce: eip7702Auth.nonce,
-                      r: eip7702Auth.r,
-                      s: eip7702Auth.s,
-                      v: eip7702Auth.v,
-                      yParity: eip7702Auth.yParity
-                  }
-                : null
-        )
-        .filter(Boolean) as SignedAuthorizationList
+    const authMap = new Map<Address, SignedAuthorizationList[number]>()
 
+    // Deduplicate EIP-7702 auths if userOp.sender has multiple same eip7702Auth fields.
+    for (const { userOp } of userOpInfos) {
+        const { eip7702Auth, sender } = userOp
+        if (eip7702Auth && !authMap.has(sender)) {
+            authMap.set(sender, {
+                address: getEip7702AuthAddress(eip7702Auth),
+                chainId: eip7702Auth.chainId,
+                nonce: eip7702Auth.nonce,
+                r: eip7702Auth.r,
+                s: eip7702Auth.s,
+                v: eip7702Auth.v,
+                yParity: eip7702Auth.yParity
+            })
+        }
+    }
+
+    const authList = Array.from(authMap.values()) as SignedAuthorizationList
     return authList.length > 0 ? authList : undefined
 }
 
@@ -215,9 +259,9 @@ export async function flushStuckTransaction({
                 { txHash, nonce: nonceToFlush, wallet: wallet.address },
                 "flushed stuck transaction"
             )
-        } catch (e) {
-            sentry.captureException(e)
-            logger.warn({ error: e }, "error flushing stuck transaction")
+        } catch (err) {
+            sentry.captureException(err)
+            logger.warn({ err }, "error flushing stuck transaction")
         }
     }
 }

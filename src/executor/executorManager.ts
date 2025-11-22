@@ -2,10 +2,10 @@ import type { GasPriceManager } from "@alto/handlers"
 import type { Mempool } from "@alto/mempool"
 import type {
     BundlingMode,
+    GasPriceParameters,
     SubmittedBundleInfo,
     UserOperationBundle
 } from "@alto/types"
-import type { GasPriceParameters } from "@alto/types"
 import { type Logger, type Metrics, scaleBigIntByPercent } from "@alto/utils"
 import type { Block, Hex, WatchBlocksReturnType } from "viem"
 import type { AltoConfig } from "../createConfig"
@@ -18,16 +18,16 @@ const SCALE_FACTOR = 10 // Interval increases by 10ms per task per minute
 const RPM_WINDOW = 60000 // 1 minute window in ms
 
 export class ExecutorManager {
-    private senderManager: SenderManager
-    private config: AltoConfig
-    private executor: Executor
-    private mempool: Mempool
-    private logger: Logger
-    private metrics: Metrics
-    private gasPriceManager: GasPriceManager
+    private readonly senderManager: SenderManager
+    private readonly config: AltoConfig
+    private readonly executor: Executor
+    private readonly mempool: Mempool
+    private readonly logger: Logger
+    private readonly metrics: Metrics
+    private readonly gasPriceManager: GasPriceManager
+    private readonly bundleManager: BundleManager
     private opsCount: number[] = []
     private bundlingMode: BundlingMode
-    private bundleManager: BundleManager
     private unWatch: WatchBlocksReturnType | undefined
 
     private currentlyHandlingBlock = false
@@ -63,7 +63,9 @@ export class ExecutorManager {
         this.senderManager = senderManager
         this.bundlingMode = this.config.bundleMode
         this.bundleManager = bundleManager
+    }
 
+    start(): void {
         if (this.bundlingMode === "auto") {
             this.autoScalingBundling()
         }
@@ -89,7 +91,9 @@ export class ExecutorManager {
             (timestamp) => now - timestamp < RPM_WINDOW
         )
 
-        const bundles = await this.mempool.getBundles()
+        const bundles = await this.mempool.getBundles(
+            this.config.maxBundleCount
+        )
 
         if (bundles.length > 0) {
             // Count total ops and add timestamps
@@ -129,8 +133,8 @@ export class ExecutorManager {
             const intervalId = setInterval(async () => {
                 try {
                     await this.handleBlock()
-                } catch (error) {
-                    this.logger.error({ error }, "error while polling blocks")
+                } catch (err) {
+                    this.logger.error({ err }, "error while polling blocks")
                 }
             }, this.config.flashblocksPreconfirmationTime)
 
@@ -144,8 +148,8 @@ export class ExecutorManager {
                 onBlock: async (block) => {
                     await this.handleBlock(block)
                 },
-                onError: (error) => {
-                    this.logger.error({ error }, "error while watching blocks")
+                onError: (err) => {
+                    this.logger.error({ err }, "error while watching blocks")
                 },
                 includeTransactions: false,
                 emitMissed: false
@@ -247,7 +251,7 @@ export class ExecutorManager {
                     )
                     .map(({ userOpInfo }) => userOpInfo)
 
-                await this.mempool.removeProcessingUserOps({
+                await this.mempool.removeProcessing({
                     entryPoint,
                     userOps: confirmedUserOps
                 })
@@ -309,7 +313,6 @@ export class ExecutorManager {
 
         await this.mempool.markUserOpsAsSubmitted({
             userOps: submittedBundle.bundle.userOps,
-            entryPoint: submittedBundle.bundle.entryPoint,
             transactionHash: submittedBundle.transactionHash
         })
 
@@ -492,7 +495,7 @@ export class ExecutorManager {
                     setTimeout(resolve, blockTime / 2)
                 )
             } catch (err) {
-                logger.warn({ error: err }, "failed to cancel bundle")
+                logger.warn({ err }, "failed to cancel bundle")
                 gasMultiplier += 20n // Increase gas by additional 20% each retry
             }
         }
@@ -593,7 +596,7 @@ export class ExecutorManager {
                     )
                     .map(({ userOpInfo }) => userOpInfo)
 
-                await this.mempool.removeSubmittedUserOps({
+                await this.mempool.removeProcessing({
                     entryPoint,
                     userOps: confirmedUserOps
                 })
@@ -664,7 +667,5 @@ export class ExecutorManager {
         this.metrics.replacedTransactions
             .labels({ reason, status: "success" })
             .inc()
-
-        return
     }
 }

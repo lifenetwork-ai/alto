@@ -3,16 +3,16 @@ import type { AltoConfig } from "../createConfig"
 import { type MinMaxQueue, createMinMaxQueue } from "../utils/minMaxQueue"
 
 export class ArbitrumManager {
-    private l1BaseFeeQueue: MinMaxQueue
-    private l2BaseFeeQueue: MinMaxQueue
+    private readonly l1BaseFeeQueue: MinMaxQueue
+    private readonly l2BaseFeeQueue: MinMaxQueue
 
     constructor({ config }: { config: AltoConfig }) {
         this.l1BaseFeeQueue = createMinMaxQueue({
-            keyPrefix: "l1-base-fee-queue",
+            queueName: "l1-base-fee-queue",
             config
         })
         this.l2BaseFeeQueue = createMinMaxQueue({
-            keyPrefix: "l2-base-fee-queue",
+            queueName: "l2-base-fee-queue",
             config
         })
     }
@@ -33,6 +33,11 @@ export class ArbitrumManager {
     public async getMaxL1BaseFee() {
         const maxL1BaseFee = await this.l1BaseFeeQueue.getMaxValue()
         return maxL1BaseFee || maxUint128
+    }
+
+    public async getMinL2BaseFee() {
+        const minL2BaseFee = await this.l2BaseFeeQueue.getMinValue()
+        return minL2BaseFee || 1n
     }
 
     public async getMaxL2BaseFee() {

@@ -1,18 +1,12 @@
-import {
-    ArbitrumL1FeeAbi,
-    type RejectedUserOp,
-    type UserOpInfo,
-    type UserOperation,
-    type UserOperation06,
-    type UserOperation07,
-    type UserOperationBundle
+import type {
+    RejectedUserOp,
+    UserOpInfo,
+    UserOperation,
+    UserOperation06,
+    UserOperation07,
+    UserOperationBundle
 } from "@alto/types"
-import {
-    type Logger,
-    getSerializedHandleOpsTx,
-    scaleBigIntByPercent,
-    toPackedUserOp
-} from "@alto/utils"
+import { type Logger, scaleBigIntByPercent, toPackedUserOp } from "@alto/utils"
 import * as sentry from "@sentry/node"
 import {
     type Address,
@@ -20,16 +14,16 @@ import {
     type StateOverride,
     decodeAbiParameters,
     decodeErrorResult,
-    encodeFunctionData,
-    getContract
+    encodeFunctionData
 } from "viem"
 import { entryPoint07Abi } from "viem/account-abstraction"
 import { formatAbiItemWithArgs } from "viem/utils"
 import type { AltoConfig } from "../createConfig"
+import { getArbitrumL1GasEstimate } from "../rpc/estimation/preVerificationGasCalculator"
 import { pimlicoSimulationsAbi } from "../types/contracts/PimlicoSimulations"
 import { getEip7702DelegationOverrides } from "../utils/eip7702"
 import { getFilterOpsStateOverride } from "../utils/entryPointOverrides"
-import { calculateAA95GasFloor, encodeHandleOpsCalldata } from "./utils"
+import { getBundleGasLimit } from "./utils"
 
 export type FilterOpsResult =
     | {
@@ -57,88 +51,22 @@ const getChainSpecificOverhead = async ({
 }: { config: AltoConfig; entryPoint: Address; userOps: UserOperation[] }) => {
     const { publicClient, chainType } = config
 
-    switch (chainType) {
-        case "arbitrum": {
-            const precompileAddress =
-                "0x00000000000000000000000000000000000000C8"
+    if (chainType === "arbitrum") {
+        const { gasForL1 } = await getArbitrumL1GasEstimate({
+            publicClient,
+            userOps,
+            entryPoint
+        })
 
-            const serializedTx = getSerializedHandleOpsTx({
-                userOps,
-                entryPoint,
-                chainId: publicClient.chain?.id ?? 10,
-                removeZeros: false
-            })
-
-            const arbGasPriceOracle = getContract({
-                abi: ArbitrumL1FeeAbi,
-                address: precompileAddress,
-                client: {
-                    public: publicClient
-                }
-            })
-
-            const { result } =
-                await arbGasPriceOracle.simulate.gasEstimateL1Component([
-                    entryPoint,
-                    false,
-                    serializedTx
-                ])
-
-            const [gasEstimateForL1, ,] = result
-
-            return {
-                gasUsed: gasEstimateForL1,
-                // scaling by 10% as recommended by docs.
-                // https://github.com/OffchainLabs/nitro-contracts/blob/bdb8f8c68b2229fe9309fe9c03b37017abd1a2cd/src/node-interface/NodeInterface.sol#L105
-                gasLimit: scaleBigIntByPercent(gasEstimateForL1, 110n)
-            }
+        return {
+            gasUsed: gasForL1,
+            // scaling by 10% as recommended by docs.
+            // https://github.com/OffchainLabs/nitro-contracts/blob/bdb8f8c68b2229fe9309fe9c03b37017abd1a2cd/src/node-interface/NodeInterface.sol#L105
+            gasLimit: scaleBigIntByPercent(gasForL1, 110n)
         }
-        default:
-            return { gasUsed: 0n, gasLimit: 0n }
-    }
-}
-
-const getBundleGasLimit = async ({
-    config,
-    userOpBundle,
-    entryPoint,
-    executorAddress
-}: {
-    config: AltoConfig
-    userOpBundle: UserOpInfo[]
-    entryPoint: Address
-    executorAddress: Address
-}): Promise<bigint> => {
-    const { rpcGasEstimate, publicClient } = config
-
-    let gasLimit: bigint
-
-    // On some chains we can't rely on local calculations and have to estimate the gasLimit from RPC
-    if (rpcGasEstimate) {
-        gasLimit = await publicClient.estimateGas({
-            to: entryPoint,
-            account: executorAddress,
-            data: encodeHandleOpsCalldata({
-                userOps: userOpBundle.map(({ userOp }) => userOp),
-                beneficiary: executorAddress
-            })
-        })
-    } else {
-        const aa95GasFloor = calculateAA95GasFloor({
-            userOps: userOpBundle.map(({ userOp }) => userOp),
-            beneficiary: executorAddress
-        })
-
-        const eip7702UserOpCount = userOpBundle.filter(
-            ({ userOp }) => userOp.eip7702Auth
-        ).length
-        const eip7702Overhead = BigInt(eip7702UserOpCount) * 40_000n
-
-        // Add 5% safety margin to local estimates.
-        gasLimit = scaleBigIntByPercent(aa95GasFloor + eip7702Overhead, 105n)
     }
 
-    return gasLimit
+    return { gasUsed: 0n, gasLimit: 0n }
 }
 
 const getFilterOpsResult = async ({
@@ -230,8 +158,8 @@ const getFilterOpsResult = async ({
     }
 
     const stateOverride = [
-        ...(eip7702Override ? eip7702Override : []),
-        ...(simulationOverrides ? simulationOverrides : [])
+        ...(eip7702Override ?? []),
+        ...(simulationOverrides ?? [])
     ]
 
     const callResult = await publicClient.call({
@@ -273,25 +201,101 @@ const getFilterOpsResult = async ({
     return filterOpsResult[0]
 }
 
+type UserOpinfoWithEip7702Auth = UserOpInfo & {
+    userOp: { eip7702Auth: NonNullable<UserOperation["eip7702Auth"]> }
+}
+
+const validateEip7702AuthNonces = async ({
+    userOps,
+    publicClient
+}: {
+    userOps: UserOpInfo[]
+    publicClient: AltoConfig["publicClient"]
+}): Promise<{
+    rejectedUserOps: RejectedUserOp[]
+    validUserOps: UserOpInfo[]
+}> => {
+    const eip7702UserOps = userOps.filter(
+        (userOpInfo): userOpInfo is UserOpinfoWithEip7702Auth =>
+            userOpInfo.userOp.eip7702Auth !== null &&
+            userOpInfo.userOp.eip7702Auth !== undefined
+    )
+    const nonEip7702UserOps = userOps.filter(
+        ({ userOp }) => !userOp.eip7702Auth
+    )
+
+    const onchainNonces = await Promise.all(
+        eip7702UserOps.map(({ userOp }) =>
+            publicClient.getTransactionCount({ address: userOp.sender })
+        )
+    )
+
+    const rejectedUserOps: RejectedUserOp[] = []
+    const validEip7702UserOps: UserOpInfo[] = []
+
+    for (let i = 0; i < eip7702UserOps.length; i++) {
+        const userOpInfo = eip7702UserOps[i]
+        const expectedNonce = onchainNonces[i]
+        const authNonce = userOpInfo.userOp.eip7702Auth.nonce
+
+        if (authNonce === expectedNonce) {
+            validEip7702UserOps.push(userOpInfo)
+        } else {
+            rejectedUserOps.push({
+                ...userOpInfo,
+                reason: `EIP-7702 auth nonce mismatch: expected ${expectedNonce}, got ${authNonce}`
+            })
+        }
+    }
+
+    return {
+        rejectedUserOps,
+        validUserOps: [...nonEip7702UserOps, ...validEip7702UserOps]
+    }
+}
+
 // Attempt to create a handleOps bundle + estimate bundling tx gas.
 export async function filterOpsAndEstimateGas({
+    checkEip7702AuthNonces,
     userOpBundle,
     config,
     logger,
     networkBaseFee
 }: {
+    checkEip7702AuthNonces: boolean
     userOpBundle: UserOperationBundle
     config: AltoConfig
     logger: Logger
     networkBaseFee: bigint
 }): Promise<FilterOpsResult> {
-    const { utilityWalletAddress: beneficiary } = config
+    const { utilityWalletAddress: beneficiary, publicClient } = config
     const { userOps, entryPoint } = userOpBundle
 
     try {
+        let rejectedByEip7702Nonce: RejectedUserOp[] = []
+        let validUserOps: UserOpInfo[] = userOps
+
+        if (checkEip7702AuthNonces) {
+            const result = await validateEip7702AuthNonces({
+                userOps,
+                publicClient
+            })
+
+            // Update validUserOps after eip7702 nonce check.
+            validUserOps = result.validUserOps
+            rejectedByEip7702Nonce = result.rejectedUserOps
+
+            if (validUserOps.length === 0) {
+                return {
+                    status: "all_ops_rejected",
+                    rejectedUserOps: rejectedByEip7702Nonce
+                }
+            }
+        }
+
         // Create promises for parallel execution
         const filterOpsPromise = getFilterOpsResult({
-            userOpBundle,
+            userOpBundle: { ...userOpBundle, userOps: validUserOps },
             config,
             networkBaseFee,
             beneficiary
@@ -301,7 +305,7 @@ export async function filterOpsAndEstimateGas({
         const chainSpecificOverheadPromise = getChainSpecificOverhead({
             config,
             entryPoint,
-            userOps: userOps.map(({ userOp }) => userOp)
+            userOps: validUserOps.map(({ userOp }) => userOp)
         })
 
         const results = await Promise.all([
@@ -315,12 +319,12 @@ export async function filterOpsAndEstimateGas({
         const rejectedUserOpHashes = filterOpsResult.rejectedUserOps.map(
             ({ userOpHash }) => userOpHash
         )
-        const userOpsToBundle = userOps.filter(
+        const userOpsToBundle = validUserOps.filter(
             ({ userOpHash }) => !rejectedUserOpHashes.includes(userOpHash)
         )
-        const rejectedUserOps = filterOpsResult.rejectedUserOps.map(
+        const rejectedBySimulation = filterOpsResult.rejectedUserOps.map(
             ({ userOpHash, revertReason }) => {
-                const userOpInfo = userOps.find(
+                const userOpInfo = validUserOps.find(
                     (op) => op.userOpHash === userOpHash
                 )
 
@@ -335,7 +339,7 @@ export async function filterOpsAndEstimateGas({
                 }
 
                 // Try to decode the revert reason
-                let decodedReason: string = revertReason
+                let decodedReason: string
                 try {
                     const errorResult = decodeErrorResult({
                         abi: entryPoint07Abi,
@@ -350,7 +354,7 @@ export async function filterOpsAndEstimateGas({
                     })
 
                     decodedReason = formattedError || revertReason
-                } catch (e) {
+                } catch {
                     // If decoding fails, keep the raw hex
                     decodedReason = revertReason
                 }
@@ -362,29 +366,40 @@ export async function filterOpsAndEstimateGas({
             }
         )
 
+        const allRejectedUserOps = [
+            ...rejectedByEip7702Nonce,
+            ...rejectedBySimulation
+        ]
+
         if (userOpsToBundle.length === 0) {
             return {
                 status: "all_ops_rejected",
-                rejectedUserOps
+                rejectedUserOps: allRejectedUserOps
             }
         }
-
-        // find overhead that can't be calculated onchain
-        const bundleGasUsed =
-            filterOpsResult.gasUsed + 21_000n + offChainOverhead.gasUsed
 
         // Find gasLimit needed for this bundle
         const bundleGasLimit = await getBundleGasLimit({
             config,
-            userOpBundle: userOpsToBundle,
+            userOps: userOpsToBundle.map(({ userOp }) => userOp),
             entryPoint,
             executorAddress: beneficiary
         })
 
+        let bundleGasUsed: bigint
+        if (config.chainType === "monad") {
+            // Monad uses the entire tx.gasLimit.
+            bundleGasUsed = bundleGasLimit
+        } else {
+            // Find overhead that can't be calculated onchain.
+            bundleGasUsed =
+                filterOpsResult.gasUsed + 21_000n + offChainOverhead.gasUsed
+        }
+
         return {
             status: "success",
             userOpsToBundle,
-            rejectedUserOps,
+            rejectedUserOps: allRejectedUserOps,
             bundleGasUsed,
             bundleGasLimit: bundleGasLimit + offChainOverhead.gasLimit,
             totalBeneficiaryFees: filterOpsResult.balanceChange
